@@ -45,6 +45,7 @@ ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from ultralytics.utils.plotting import Annotator, colors, save_one_box
 
+
 from yolov5.models import DetectMultiBackend
 from yolov5.utils.dataloaders import IMG_FORMATS, VID_FORMATS, LoadImages, LoadScreenshots, LoadStreams
 from yolov5.utils.general import (
@@ -63,6 +64,7 @@ from yolov5.utils.general import (
     strip_optimizer,
     xyxy2xywh,
 )
+
 from yolov5.utils.torch_utils import select_device, smart_inference_mode
 
 
@@ -149,8 +151,6 @@ def run(
                 for image in ims:
                     if pred is None:
                         pred = model(image, augment=augment, visualize=visualize).unsqueeze(0)
-                        print(pred.shape)
-                        exit()
                     else:
                         pred = torch.cat((pred, model(image, augment=augment, visualize=visualize).unsqueeze(0)), dim=0)
                 pred = [pred, None]

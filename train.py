@@ -186,9 +186,6 @@ def train(hyp, opt, device, callbacks):
         with torch_distributed_zero_first(LOCAL_RANK):
             weights = attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location="cpu")  # load checkpoint to CPU to avoid CUDA memory leak
-        print()
-        print(f"Anchors: {hyp.get('anchors')}")
-        print()
         model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
         exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
         csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
@@ -261,7 +258,7 @@ def train(hyp, opt, device, callbacks):
         gs,
         single_cls,
         hyp=hyp,
-        augment=False,
+        augment=True,
         cache=None if opt.cache == "val" else opt.cache,
         rect=opt.rect,
         rank=LOCAL_RANK,
@@ -382,15 +379,8 @@ def train(hyp, opt, device, callbacks):
 
             # Forward
             with torch.cuda.amp.autocast(amp):
-                print()
-                print(f"imgs.shape=={imgs.shape}")
                 pred = model(imgs)  # forward
-                print(f"predictions: len(pred)=={len(pred)}, pred[0].shape=={pred[0].shape}")
-                print()
-                print(f"targets: targets.shape=={targets.shape}, targets[:10,0]=={targets[:10,0]}")
-                print(f"targets[0]=={targets[0]}, \ntargets[1]=={targets[1]}")
                 loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                # exit()
                 if RANK != -1:
                     loss *= WORLD_SIZE  # gradient averaged between devices in DDP mode
                 if opt.quad:
@@ -651,10 +641,9 @@ def main(opt, callbacks=Callbacks()):
             "iou_t": (False, 0.1, 0.7),  # IoU training threshold
             "anchor_t": (False, 2.0, 8.0),  # anchor-multiple threshold
             "anchors": (False, 2.0, 10.0),  # anchors per output grid (0 to ignore)
-            "fl_gamma": (False, 0.0, 2.0),  # focal loss gamma (efficientDet default gamma=1.5)
-            "hsv_h": (False, 0.0, 0.1),  # image HSV-Hue augmentation (fraction)
-            "hsv_s": (False, 0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
-            "hsv_v": (False, 0.0, 0.9),  # image HSV-Value augmentation (fraction)
+            "fl_gamma": (False, 0.0, 2.0),  # focal loss gamma (efficientDet default gamma=1.5)hsv_h": (True, 0.0, 0.1),  # image HSV-Hue augmentation (fraction)
+            "hsv_s": (True, 0.0, 0.9),  # image HSV-Saturation augmentation (fraction)
+            "hsv_v": (True, 0.0, 0.9),  # image HSV-Value augmentation (fraction)
             "degrees": (True, 0.0, 45.0),  # image rotation (+/- deg)
             "translate": (True, 0.0, 0.9),  # image translation (+/- fraction)
             "scale": (True, 0.0, 0.9),  # image scale (+/- gain)

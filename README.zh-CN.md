@@ -317,7 +317,7 @@ model = torch.hub.load(
 将 YOLOv5s-seg 模型导出到 ONNX 和 TensorRT：
 
 ```bash
-python yolov5.export.py --weights yolov5s-seg.pt --include onnx engine --img 640 --device 0
+python export.py --weights yolov5s-seg.pt --include onnx engine --img 640 --device 0
 ```
 
 </details>
@@ -404,7 +404,7 @@ model = torch.hub.load(
 将一组经过训练的 YOLOv5s-cls、ResNet 和 EfficientNet 模型导出到 ONNX 和 TensorRT：
 
 ```bash
-python yolov5.export.py --weights yolov5s-cls.pt resnet50.pt efficientnet_b0.pt --include onnx engine --img 224
+python export.py --weights yolov5s-cls.pt resnet50.pt efficientnet_b0.pt --include onnx engine --img 224
 ```
 
 </details>

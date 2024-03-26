@@ -39,13 +39,13 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 # ROOT = ROOT.relative_to(Path.cwd())  # relative
 
-from yolov5 import export
-from yolov5.models import attempt_load
-from yolov5.models.yolo import SegmentationModel
-from yolov5.segment import run as val_seg
-from yolov5.utils import notebook_init
-from yolov5.utils.general import LOGGER, check_yaml, file_size, print_args
-from yolov5.utils.torch_utils import select_device
+import export
+from models.experimental import attempt_load
+from models.yolo import SegmentationModel
+from segment.val import run as val_seg
+from utils import notebook_init
+from utils.general import LOGGER, check_yaml, file_size, print_args
+from utils.torch_utils import select_device
 from val import run as val_det
 
 
@@ -63,7 +63,7 @@ def run(
     y, t = [], time.time()
     device = select_device(device)
     model_type = type(attempt_load(weights, fuse=False))  # DetectionModel, SegmentationModel, etc.
-    for i, (name, f, suffix, cpu, gpu) in yolov5.export.export_formats().iterrows():  # index, (name, file, suffix, CPU, GPU)
+    for i, (name, f, suffix, cpu, gpu) in export.export_formats().iterrows():  # index, (name, file, suffix, CPU, GPU)
         try:
             assert i not in (9, 10), "inference not supported"  # Edge TPU and TF.js are unsupported
             assert i != 5 or platform.system() == "Darwin", "inference only supported on macOS>=10.13"  # CoreML
