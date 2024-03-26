@@ -1,0 +1,15 @@
+artifact_uri: /home/deli_fo/projects/object_detection/patch_generation/patch_generation/runs/mlflow/941758277464791073/8b03bcd9c0d8424ca9c3c49f140f5a2d/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '941758277464791073'
+lifecycle_stage: active
+run_id: 8b03bcd9c0d8424ca9c3c49f140f5a2d
+run_name: train
+run_uuid: 8b03bcd9c0d8424ca9c3c49f140f5a2d
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1709636222276
+status: 1
+tags: []
+user_id: deli_fo
