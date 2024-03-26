@@ -24,6 +24,7 @@
 !cfg/yolov3*.cfg
 
 storage.googleapis.com
+detect/
 runs/*
 data/hyps
 data/images/*
@@ -118,6 +119,9 @@ coverage.xml
 # Translations
 *.mo
 *.pot
+
+# MLFLow stuff:
+mlflow/
 
 # Django stuff:
 *.log
