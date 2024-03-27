@@ -1,5 +1,7 @@
+import os
 import torch
 import glob
+import yaml
 import os.path as osp
 from typing import Tuple, Optional
 
@@ -17,7 +19,7 @@ from easydict import EasyDict as edict
 
 
 RESOLUTION = [256, 256]
-PATCH_SIZE = [10, 10]
+PATCH_SIZE = [3, 10, 10]
 IMG_FORMAT = {".png", ".jpg", ".jpeg"}
 
 
@@ -34,7 +36,6 @@ def generate_patch(resolution=None, p_size=None):
     patch.requires_grad_(True)
     return patch
 
-
 def load_config_object(cfg_path: str) -> edict:
     """
     Loads a config json and returns a edict object
@@ -43,7 +44,6 @@ def load_config_object(cfg_path: str) -> edict:
         cfg_dict = json.load(json_file)
 
     return edict(cfg_dict)
-
 
 def get_scaled_anchors(anchors: List[List[int]], stride: List[int]):
     assert len(anchors) == len(stride)
@@ -58,8 +58,14 @@ def get_scaled_anchors(anchors: List[List[int]], stride: List[int]):
             torch.tensor([dims[2*k], dims[2*k+1]]) for k in range(anchors_per_layer)
             ])
         hw_anchors.append(hw_tensor)
-    return hw_anchors, nl, na
+    return torch.stack(hw_anchors), nl, na
 
+def load_hyp_to_dict(hypfile: str):
+    with open(hypfile, errors="ignore") as f:
+        hyp = yaml.safe_load(f)  # load hyps dict
+    anchors, nl, na = get_scaled_anchors(hyp["anchors"], hyp["stride"])
+    hyp.update({"na": na, "anchors": anchors, "nl": nl})
+    return hyp
 
 # credit: https://github.com/SamSamhuns/yolov5_adversarial/blob/master/adv_patch_gen/utils/dataset.py
 class YOLODataset(Dataset):
@@ -73,7 +79,7 @@ class YOLODataset(Dataset):
         use_even_odd_images: optionally load a data subset based on the last numeric char of the img filename [all, even, odd]
         filter_class_id: np.ndarray class id(s) to get. Set None to get all classes
         min_pixel_area: min pixel area below which all boxes are filtered out. (Out of the model in size area)
-        shuffle: Whether or not to shuffle the dataset.
+        shuffle: Whether to shuffle the dataset.
     """
 
     def __init__(self,
@@ -148,7 +154,6 @@ class YOLODataset(Dataset):
                 self.min_pixel_area / (self.model_in_sz[0] * self.model_in_sz[1]))]
             label = label if len(label) > 0 else torch.zeros([1, 5])
         image = transforms.ToTensor()(image)
-        # label = self.pad_label(label)
         return image, label
 
     def pad_and_scale(self, img, lab):
@@ -177,16 +182,22 @@ class YOLODataset(Dataset):
 
         return padded_img, lab
 
-    def pad_label(self, label: torch.Tensor) -> torch.Tensor:
-        """
-        Pad labels with zeros if fewer labels than max_n_labels present
-        """
-        pad_size = self.max_n_labels - label.shape[0]
-        if pad_size > 0:
-            padded_lab = F.pad(label, (0, 0, 0, pad_size), value=0)
-        else:
-            padded_lab = label[:self.max_n_labels]
-        return padded_lab
+    # def pad_label(self, label: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Pad labels with zeros if fewer labels than max_n_labels present
+    #     """
+    #     pad_size = self.max_n_labels - label.shape[0]
+    #     if pad_size > 0:
+    #         padded_lab = F.pad(label, (0, 0, 0, pad_size), value=0)
+    #     else:
+    #         padded_lab = label[:self.max_n_labels]
+    #     return padded_lab
+
+    @staticmethod
+    def collate_fn(batch):
+        images, labels = [b[0] for b in batch], [b[1] for b in batch]
+        images = torch.stack(images)
+        return images, labels
 
     @staticmethod
     def expand_img_labels(img_idx: int, label: torch.Tensor):
@@ -200,61 +211,14 @@ class YOLODataset(Dataset):
         expanded[:, 0] = torch.full((len(label),), img_idx)
         return expanded
 
-
-# credit: https://github.com/SamSamhuns/yolov5_adversarial/blob/master/adv_patch_gen/utils/loss.py
-class NPSLoss(nn.Module):
-    """NMSLoss: calculates the non-printability-score loss of a patch.
-    Module providing the functionality necessary to calculate the non-printability score (NMS) of an adversarial patch.
-    However, a summation of the differences is used instead of the total product to calc the NPSLoss
-    Reference: https://users.ece.cmu.edu/~lbauer/papers/2016/ccs2016-face-recognition.pdf
-        Args:
-            triplet_scores_fpath: str, path to csv file with RGB triplets sep by commas in newlines
-            size: Tuple[int, int], Tuple with height, width of the patch
-    """
-
-    def __init__(self, triplet_scores_fpath: str, size: Tuple[int, int]):
-        super(NPSLoss, self).__init__()
-        self.printability_array = nn.Parameter(self.get_printability_array(
-            triplet_scores_fpath, size), requires_grad=False)
-
-    def forward(self, adv_patch):
-        # calculate euclidian distance between colors in patch and colors in printability_array
-        # square root of sum of squared difference
-        color_dist = (adv_patch - self.printability_array + 0.000001)
-        color_dist = color_dist ** 2
-        color_dist = torch.sum(color_dist, 1) + 0.000001
-        color_dist = torch.sqrt(color_dist)
-        # use the min distance
-        color_dist_prod = torch.min(color_dist, 0)[0]
-        # calculate the nps by summing over all pixels
-        nps_score = torch.sum(color_dist_prod, 0)
-        nps_score = torch.sum(nps_score, 0)
-        return nps_score / torch.numel(adv_patch)
-
     @staticmethod
-    def get_printability_array(triplet_scores_fpath: str, size: Tuple[int, int, int]) -> torch.Tensor:
+    def labels_to_targets(labels):
         """
-        Get printability tensor array holding the rgb triplets (range [0,1]) loaded from triplet_scores_fpath
-        Args:
-            triplet_scores_fpath: str, path to csv file with RGB triplets sep by commas in newlines
-            size: Tuple[int, int], Tuple with height, width of the patch
+        Creates targets according to expand_img_labels for a batch of labels
         """
-        ref_triplet_list = []
-        # read in reference printability triplets into a list
-        with open(triplet_scores_fpath, 'r', encoding="utf-8") as f:
-            for line in f:
-                ref_triplet_list.append(line.strip().split(","))
-
-        p_h, p_w = size[1:]
-        printability_array = []
-        for ref_triplet in ref_triplet_list:
-            r, g, b = map(float, ref_triplet)
-            ref_tensor_img = torch.stack([torch.full((p_h, p_w), r),
-                                          torch.full((p_h, p_w), g),
-                                          torch.full((p_h, p_w), b)])
-            printability_array.append(ref_tensor_img.float())
-        return torch.stack(printability_array)
-
+        targets = list(map(lambda tup: YOLODataset.expand_img_labels(tup[0], tup[1]),
+                           [(i, labels[i]) for i in range(len(labels))]))
+        return torch.concat(targets)
 
 def get_detection_probs(output: torch.Tensor, n_classes: int = 80):
     """
@@ -278,4 +242,88 @@ def get_detection_probs(output: torch.Tensor, n_classes: int = 80):
 
     return output_with_probs
 
+## Patch utils ##
 
+def init_patch(p_size=PATCH_SIZE, p_file=None):
+    if p_file:
+        patch = torch.load(p_file)
+        return patch
+    patch = torch.randn(p_size)
+    return patch
+
+def get_random_position(img_size=RESOLUTION, p_size=PATCH_SIZE):
+    assert img_size[0] > p_size[0] and img_size[1] > p_size[1]
+    h_limit = (0, img_size[0]-p_size[0])
+    w_limit = (0, img_size[1] - p_size[1])
+    x = np.random.randint(h_limit[0], h_limit[1], 1)[0]
+    y = np.random.randint(w_limit[0], w_limit[1], 1)[0]
+    return torch.tensor([x, y])
+
+def apply_patch(image, patch, position=None):
+    """
+    Apply a patch to an image at a specified position.
+
+    Args:
+        image (torch.Tensor): The input image tensor.
+        patch (torch.Tensor): The patch tensor to be applied.
+        position (tuple): The position (x, y) where the patch should be placed.
+
+    Returns:
+        torch.Tensor: The resulting image tensor after applying the patch.
+    """
+    if not position:
+        for i in range(10): # max. number of tries
+            try:
+                position = get_random_position(image.shape[1:], patch.shape[1:])
+                assert image.shape[1] > position[0] + patch.shape[1]
+                assert image.shape[2] > position[1] + patch.shape[2]
+                break
+            except AssertionError:
+                pass
+    patched_img = image.clone().detach()
+    x, y = position
+    patched_img[:, x:x + patch.shape[1], y:y + patch.shape[2]] = patch.clone().detach()
+
+    return patched_img.float(), position
+
+
+def check_or_create_dir(dir):
+    if not os.path.isdir(dir):
+        os.makedirs(dir)
+    return
+
+
+# def get_ground_truth(patch_size, position, img_size,
+#                      n_labels=80, class_id=-1, probs=False):
+#     """
+#         Construct the detection ground truth for the patch attack.
+#         For detection, the labels are in format (clas_id, center_x, center_y, box_h, box_w)
+#         and normalized coordinates.
+#         Check https://roboflow.com/formats/yolov5-pytorch-txt?ref=ultralytics for details.
+#
+#         Args:
+#             patch_size (tuple or torch.Size): shape of patch
+#             position (tuple): Position of upper left corner of patch as applied on images
+#             img_size (tuple or torch.Size): shape of images
+#             class_id (int): The target class id, if untargeted defaults to -1
+#             n_labels (int): number of distinct object labels
+#             probs (bool): whether to return tuple in the form of class probabilities (similar to model output)
+#
+#         Returns:
+#             list: The resulting label ground truth of the patch in format:
+#              (clas_id, center_x, center_y, box_h, box_w)
+#              or
+#              (center_x, center_y, box_h, box_w, 0, .., 1, ..., 0)
+#              with class probabilities (all 0 except for class_id).
+#              Coordinates _x and _y are normalized by the image's width and height.
+#         """
+#     H, W = img_size
+#     center_x = (position[0] + patch_size[0]//2) / H
+#     center_y = (position[1] + patch_size[1]//2) / W
+#     box_h = patch_size[0] / H
+#     box_w = patch_size[0] / W
+#     if probs:
+#         probs = [0]*n_labels
+#         probs[class_id] = 1
+#         return [center_x, center_y, box_h, box_w] + probs
+#     return [class_id, center_x, center_y, box_h, box_w]

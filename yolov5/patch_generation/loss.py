@@ -29,15 +29,14 @@ def non_maximum_suppression(preds: List[torch.Tensor], iou_threshold: float =0.4
     return preds_nms
 
 
-def extract_patch_grads(patched_img: torch.Tensor,
+def extract_patch_grads(patched_img_grads: torch.Tensor,
                         position: Union[List[int], Tuple[int]],
                         patch_size: Tuple[int]):
     """
     Extracts gradients only for patch which is located at `position` in patched_image.
     """
-    grads = patched_img.grad
     x, y = position
-    patch_grads = grads[:, x:x+patch_size[0], y:y+patch_size[1]]
+    patch_grads = patched_img_grads[:, x:x+patch_size[0], y:y+patch_size[1]]
     return patch_grads
 
 
@@ -68,7 +67,7 @@ class ComputeLoss:
         self.na = hyp["na"]  # number of anchors
         self.nc = hyp["nc"]  # number of classes
         self.nl = hyp["nl"]  # number of layers
-        self.anchors = hyp["anchors"]
+        self.anchors = hyp["anchors"].to(device)
         self.device = device
 
 
@@ -183,6 +182,61 @@ class ComputeLoss:
             tcls.append(c)  # class
 
         return tcls, tbox, indices, anch
+
+
+# credit: https://github.com/SamSamhuns/yolov5_adversarial/blob/master/adv_patch_gen/utils/loss.py
+class NPSLoss(torch.nn.Module):
+    """NMSLoss: calculates the non-printability-score loss of a patch.
+    Module providing the functionality necessary to calculate the non-printability score (NMS) of an adversarial patch.
+    However, a summation of the differences is used instead of the total product to calc the NPSLoss
+    Reference: https://users.ece.cmu.edu/~lbauer/papers/2016/ccs2016-face-recognition.pdf
+        Args:
+            triplet_scores_fpath: str, path to csv file with RGB triplets sep by commas in newlines
+            size: Tuple[int, int], Tuple with height, width of the patch
+    """
+
+    def __init__(self, triplet_scores_fpath: str, size: Tuple[int, int], device: str="cuda"):
+        super(NPSLoss, self).__init__()
+        self.printability_array = torch.nn.Parameter(self.get_printability_array(
+            triplet_scores_fpath, size), requires_grad=False).to(device)
+
+    def forward(self, adv_patch):
+        # calculate euclidian distance between colors in patch and colors in printability_array
+        # square root of sum of squared difference
+        color_dist = (adv_patch - self.printability_array + 0.000001)
+        color_dist = color_dist ** 2
+        color_dist = torch.sum(color_dist, 1) + 0.000001
+        color_dist = torch.sqrt(color_dist)
+        # use the min distance
+        color_dist_prod = torch.min(color_dist, 0)[0]
+        # calculate the nps by summing over all pixels
+        nps_score = torch.sum(color_dist_prod, 0)
+        nps_score = torch.sum(nps_score, 0)
+        return nps_score / torch.numel(adv_patch)
+
+    @staticmethod
+    def get_printability_array(triplet_scores_fpath: str, size: Tuple[int, int]) -> torch.Tensor:
+        """
+        Get printability tensor array holding the rgb triplets (range [0,1]) loaded from triplet_scores_fpath
+        Args:
+            triplet_scores_fpath: str, path to csv file with RGB triplets sep by commas in newlines
+            size: Tuple[int, int], Tuple with height, width of the patch
+        """
+        ref_triplet_list = []
+        # read in reference printability triplets into a list
+        with open(triplet_scores_fpath, 'r', encoding="utf-8") as f:
+            for line in f:
+                ref_triplet_list.append(line.strip().split(","))
+
+        p_h, p_w = size
+        printability_array = []
+        for ref_triplet in ref_triplet_list:
+            r, g, b = map(float, ref_triplet)
+            ref_tensor_img = torch.stack([torch.full((p_h, p_w), r),
+                                          torch.full((p_h, p_w), g),
+                                          torch.full((p_h, p_w), b)])
+            printability_array.append(ref_tensor_img.float())
+        return torch.stack(printability_array)
 
 
 class ClassificationLoss(torch.nn.Module):
