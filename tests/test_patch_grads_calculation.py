@@ -1,6 +1,6 @@
 import torch
 from yolov5.patch_generation.loss import extract_patch_grads
-from yolov5.patch_generation.generate import apply_patch, init_patch
+from yolov5.patch_generation.utils import apply_patch, init_patch
 
 
 def main():
@@ -9,9 +9,7 @@ def main():
     patched_image, position = apply_patch(image, patch)
     patched_image.requires_grad_(True)
     layer = torch.nn.Conv2d(3, 3, (1, 1))
-    layer.weight.requires_grad_(True)
-    layer.bias.requires_grad_(True)
-    out = layer(patched_image).pow(2).sum()
+    out = layer(patched_image).sum()
     out.backward()
     print(f"patched_image.grad_fn=={patched_image.grad_fn}")
     print(f"patched_image.grad[0, position[0], position[1]]=={patched_image.grad[0, position[0], position[1]]}")

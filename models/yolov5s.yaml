@@ -9,6 +9,15 @@ anchors:
   - [30, 61, 62, 45, 59, 119] # P4/16
   - [116, 90, 156, 198, 373, 326] # P5/32
 
+stride: [8, 16, 32]
+box: 0.05
+cls: 0.5
+obj: 1.0
+cls_pw: 1.0
+obj_pw: 1.0
+anchor_t: 4.0
+fl_gamma: 0.0
+
 # YOLOv5 v6.0 backbone
 backbone:
   # [from, number, module, args]
