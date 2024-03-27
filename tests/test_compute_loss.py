@@ -6,7 +6,6 @@ import yaml
 
 
 def main():
-    N = 10
     hyp = "../yolov5/models/yolov5s.yaml"
     with open(hyp, errors="ignore") as f:
         hyp = yaml.safe_load(f)  # load hyps dict
@@ -17,8 +16,7 @@ def main():
     hyp["anchors"] = anchors
     hyp["nl"] = nl
     print(f"anchors=={anchors}")
-    loss = ComputeLoss(hyp)
-
+    _ = ComputeLoss(hyp)
     return True
 
 
