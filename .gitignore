@@ -26,8 +26,10 @@
 storage.googleapis.com
 detect/
 runs/*
+datasets/
 data/hyps
 data/images/*
+data/labels/*
 !data/*.yaml
 !data/hyps
 !data/scripts
@@ -122,6 +124,7 @@ coverage.xml
 
 # MLFLow stuff:
 mlflow/
+mlruns/
 
 # Django stuff:
 *.log

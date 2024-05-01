@@ -1,32 +1,8 @@
 import torch
-import numpy
-import torchvision
-from torchvision.ops import nms
 import torchvision.ops.boxes as box_ops
 from typing import List, Union, Tuple
 from yolov5.utils.loss import FocalLoss, smooth_BCE
 from yolov5.utils.metrics import bbox_iou
-
-def non_maximum_suppression(preds: List[torch.Tensor], iou_threshold: float =0.4):
-    """
-    Arguments:
-        preds: list of Tensors, shape bs x 25200 x 85
-        iou_threshold: float
-    Returns:
-        list with only selected preds that passed the nms.
-    """
-    boxes = [preds[i][:, :4] for i in range(len(preds))]
-    scores = [preds[i][:, 4] for i in range(len(preds))]
-
-    # Perform NMS
-    preds_nms = []
-    for i in range(len(preds)):
-        selected_indices = nms(boxes[i], scores[i], iou_threshold)
-        box, score = boxes[i][selected_indices], scores[i][selected_indices].unsqueeze(1)
-        preds_nms_i = torch.cat([box, score, preds[i, selected_indices, 5:]], dim=1)
-        preds_nms.append(preds_nms_i)
-
-    return preds_nms
 
 
 def extract_patch_grads(patched_img_grads: torch.Tensor,
