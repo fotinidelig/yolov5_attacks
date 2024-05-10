@@ -1,17 +1,28 @@
 from pathlib import Path
+import configparser
 import mlflow
+import torch
 import os
 
 FILE_PATH = Path(os.path.abspath(__file__)).parent
 CONFIG_FILE = FILE_PATH / ".." / ".." / "attack_config.ini"
+if not os.path.exists(CONFIG_FILE):
+    raise RuntimeError("config file not found")
 
-def check_dir(dir):
+
+def check_dir(dir: str):
     if not os.path.exists(dir):
         os.makedirs(dir)
 
 
-def info(msg):
+def info(msg: str):
     print(f"[INFO]--- {msg}\n")
+
+
+def read_config(file: str):
+    config = configparser.ConfigParser()
+    config.read(file)
+    return config
 
 
 def run_experiment(experiment_func, experiment_kwargs, experiment_name="test", run_name="test_run"):
@@ -29,3 +40,8 @@ def run_experiment(experiment_func, experiment_kwargs, experiment_name="test", r
         else:
             experiment_func()
     return experiment_id
+
+
+def cuda_info(msg: str=''):
+    info(msg+"Memory stats: allocated / reserved memory: " + str(torch.cuda.memory_allocated() / 1024 ** 2) +
+         "/ " + str(torch.cuda.memory_reserved() / 1024 ** 2) + "(MB)")

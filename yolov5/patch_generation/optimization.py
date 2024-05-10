@@ -4,27 +4,37 @@ import mlflow
 import torchvision
 from tqdm import tqdm
 from pathlib import Path
-import configparser
-from torchvision.ops import nms
-from yolov5.patch_generation import CONFIG_FILE, check_dir
-from yolov5.patch_generation.loss import ComputeLoss, extract_patch_grads, NPSLoss
+from yolov5.patch_generation import CONFIG_FILE, check_dir, read_config
+from yolov5.patch_generation.loss import ComputeLoss, NPSLoss
 from yolov5.patch_generation.utils import (
     YOLODataset,
-    batch_apply_patch,
     PatchTransform,
     register_numerical_hooks,
-    apply_patch_and_pad_batch,
+    apply_patch_to_images,
 )
 
 FILE_PATH = Path(os.path.abspath(__file__)).parent
 
-config = configparser.ConfigParser()
-config.read(CONFIG_FILE)
+# Read config parameters
+config = read_config(CONFIG_FILE)
 VAL_STEP = int(config.get("train", "val_step"))
-RUN_DIR = config.get("train", "run_dir")
-MODEL_IN_SZ = config.get("model", "model_in_sz")
+RUN_DIR = config.get("experiment", "run_dir")
+NUM_POSITIONS = config.getint("train", "num_patch_positions")
+
+# Check if run logging dirs exist
 check_dir(RUN_DIR)
 check_dir(f"{RUN_DIR}/validation/")
+
+# TODO: fine-tune the weighting of the different losses
+w_box = config.getboolean("loss", "box_loss")
+w_obj = config.getboolean("loss", "obj_loss")
+w_cls = config.getboolean("loss", "cls_loss")
+w_det = config.getboolean("loss", "det_loss")
+lambda_det = config.getboolean("loss", "lambda_det")
+lambda_nps = config.getboolean("loss", "lambda_nps")
+
+if w_det != 0 and (w_cls or w_obj or w_box):
+    raise RuntimeError(f"If w_det is non-zero, all other weights should be zero.")
 
 
 def optimization(
@@ -40,15 +50,16 @@ def optimization(
 ):
     """
     batch: torch.Tensor image batch
-    patch: torch.Tensor with requires_grad_(True)
+    patch: torch.Tensor to optimize with requires_grad_(True)
     targets: torch.Tensor of shape (N, 6) N number of detected objects in entire batch
     model: YOLO model
     """
 
-    total_batches = len(loader)
+    model.eval()
 
     # Patch transformer
     patch_transform = PatchTransform(patch, device=device)
+    register_numerical_hooks(patch)  # solves errors due to NaN and inf values
 
     # Define loss functions
     # TODO: add more losses beside detection & non-printability loss
@@ -58,49 +69,55 @@ def optimization(
         FILE_PATH / "30_rgb_triplets.csv", patch.shape[1:], device=device
     )
 
-    # TODO: fine-tune the weighting of the different losses
-    w_det = 10
-    w_nps = 1
-
     ebar = tqdm(range(epochs), desc="Epochs")
     for epoch in ebar:
-        pbar = tqdm(loader, total=total_batches, desc="Input Batches")
-        metrics = {"det_loss": 0, "nps_loss": 0, "val_det_loss": 0}
+        patch.requires_grad_(True)
+
+        pbar = tqdm(loader, total=len(loader), desc="Input Batches")
+        # metrics = {"det_loss": 0, "nps_loss": 0, "val_det_loss": 0}
+        metrics = {
+            "cls_loss": 0,
+            "box_loss": 0,
+            "obj_loss": 0,
+            "det_loss": 0,
+            "nps_loss": 0,
+            "val_cls_loss": 0,
+            "val_box_loss": 0,
+            "val_obj_loss": 0,
+            "val_det_loss": 0,
+        }
 
         for b, batch in enumerate(pbar):
             pbar.set_description(f"Input Batches ep. {epoch+1}/{ebar.total}")
             inputs, labels = batch
+            inputs = inputs.to(device)
 
             # Patch transformation
-            patches = patch_transform(len(inputs))
+            patch_transform() # transforms patch in-place
 
-            # Apply patch, afterwards pad images and labels to model input size
-            patched_inputs, targets, patch_positions = apply_patch_and_pad_batch(
-                dataset, inputs, patches, labels, device
+            # Apply patch and pad images and labels
+            patched_inputs, patch_positions = apply_patch_to_images(
+                patch, inputs, NUM_POSITIONS
             )
-            patched_inputs.requires_grad_(True)
-            register_numerical_hooks(
-                patched_inputs
-            )  # solves errors due to NaN and inf values
+            targets = dataset.labels_to_targets(labels).to(device)
+            # patched_inputs.requires_grad_(True)
+            _, preds = model(patched_inputs)
 
             # Loss calculation
             nps_loss = nps_loss_fn(patch)
-            nps_loss.backward()
+            # nps_loss.backward()
 
-            preds = model(patched_inputs)
             det_loss, box_obj_cls_loss = detection_loss_fn(preds, targets)
-            det_loss = det_loss / len(patched_inputs)  # mean detection loss
-            det_loss.backward()
-
-            # Grad calculation
-            patch_det_grads = torch.stack(
-                [
-                    extract_patch_grads(img_grads, pos, patch.shape[1:])
-                    for img_grads, pos in zip(patched_inputs.grad, patch_positions)
-                ]
+            box_loss, obj_loss, cls_loss = box_obj_cls_loss
+            balanced_loss = (
+                w_det * det_loss / len(inputs)
+                + w_cls * cls_loss
+                + w_obj * obj_loss
+                + w_box * box_loss
             )
-            patch_det_grad = torch.mean(patch_det_grads, dim=0)
-            patch.grad = w_nps * patch.grad - w_det * patch_det_grad
+            # balanced_loss.backward()
+            loss = nps_loss + balanced_loss
+            loss.backward()
 
             # Optimization step
             if torch.isnan(patch.grad.sum()):
@@ -116,54 +133,70 @@ def optimization(
             optimizer.zero_grad()
 
             # Monitoring
-            metrics["det_loss"] += det_loss.detach().item()
-            metrics["nps_loss"] += nps_loss.detach().item()
-            if b < total_batches:
-                # plot mean loss intstead at the final epoch
-                pbar.set_postfix(
-                    det_loss=det_loss.detach().item(), nps_loss=nps_loss.detach().item()
-                )
 
-            del det_loss, nps_loss, inputs, patched_inputs, preds
+            cls_loss, obj_loss, box_loss = (
+                cls_loss.detach().item(),
+                obj_loss.detach().item(),
+                box_loss.detach().item(),
+            )
+            nps_loss = nps_loss.detach().item()
+            # losses to monitor
+            keys = ["box_loss", "obj_loss", "cls_loss", "nps_loss"]
+            values = [box_loss, obj_loss, cls_loss, nps_loss]
 
-        metrics["det_loss"] /= b  # mean loss of b batches
-        metrics["nps_loss"] /= b
+            pbar.set_postfix(dict(zip(keys, values)))
 
-        pbar.set_postfix(det_loss=metrics["det_loss"], nps_loss=metrics["nps_loss"])
-        ebar.set_postfix(det_loss=metrics["det_loss"], nps_loss=metrics["nps_loss"])
+            for k, v in zip(keys, values):
+                metrics[k] += v
 
-        mlflow.log_metric("det_loss", metrics["det_loss"], epoch)
-        mlflow.log_metric("nps_loss", metrics["nps_loss"], epoch)
+            del (
+                det_loss,
+                cls_loss,
+                obj_loss,
+                box_loss,
+                nps_loss,
+                patched_inputs,
+            )
 
-        if epoch % VAL_STEP != 0 and epoch - 1 != epochs:  # no validation
+        for k in keys:
+            metrics[k] /= b
+            mlflow.log_metric(k, metrics[k], epoch)
+
+        ebar.set_postfix(
+            cls_loss=metrics["cls_loss"],
+            box_loss=metrics["box_loss"],
+            obj_loss=metrics["obj_loss"],
+            nps_loss=metrics["nps_loss"],
+        )
+
+        if valloader is None or (
+            epoch % VAL_STEP != 0 and epoch - 1 != epochs
+        ):  # no validation
             continue
 
         # Enter validation
         torch.save(patch, f"{RUN_DIR}/validation/patch_{epoch}.pt")
         torchvision.utils.save_image(patch, f"{RUN_DIR}/validation/patch_{epoch}.png")
-        # save_patch(patch.detach().clone().cpu(), f"{RUN_DIR}/patch_{epoch}")
         pbar = tqdm(valloader, total=len(valloader), desc="Validation Batches")
 
         for b, batch in enumerate(pbar):
             inputs, labels = batch
+            inputs = inputs.to(device)
 
             # Patch transformation
-            patches = patch_transform(len(inputs))
+            patch_transform() # transforms patch in-place
 
-            # Apply patch, afterwards pad images and labels to model input size
-            patched_inputs, targets, patch_positions = apply_patch_and_pad_batch(
-                dataset, inputs, patches, labels, device
-            )
+            with torch.no_grad():
+                patched_inputs, patch_positions = apply_patch_to_images(
+                    patch, inputs, NUM_POSITIONS
+                )
+                targets = dataset.labels_to_targets(labels).to(device)
+                _, preds = model(patched_inputs)
+                det_loss, box_obj_cls_loss = detection_loss_fn(preds, targets)
+            box_loss, obj_loss, cls_loss = box_obj_cls_loss
 
-            # Loss calculation
-            nps_loss = nps_loss_fn(patch)
-
-            preds = model(patched_inputs)
-            det_loss, _ = detection_loss_fn(preds, targets)
-
+            del preds, targets, box_obj_cls_loss
             # Monitoring
-
-            metrics["val_det_loss"] += det_loss.detach().item()
 
             if (
                 epoch == 0 and b == 0
@@ -173,12 +206,31 @@ def optimization(
                     f"{RUN_DIR}/validation/pathed_ims.png",
                     nrow=5,
                 )
-            pbar.set_postfix(det_loss=det_loss.detach().item())
 
-            del det_loss, nps_loss, inputs, patched_inputs, preds
+            cls_loss, obj_loss, box_loss = (
+                cls_loss.detach().item(),
+                obj_loss.detach().item(),
+                box_loss.detach().item(),
+            )
+            # losses to monitor
+            keys = ["val_cls_loss", "val_obj_loss", "val_box_loss"]
+            values = [cls_loss, obj_loss, box_loss]
 
-        metrics["val_det_loss"] /= b  # mean loss of b batches
+            pbar.set_postfix(dict(zip(["cls_loss", "obj_loss", "box_loss"], values)))
 
-        mlflow.log_metric("val_det_loss", metrics["val_det_loss"], epoch)
+            for k, v in zip(keys, values):
+                metrics[k] += v
 
-    return patch, metrics["det_loss"], metrics["nps_loss"]
+            del det_loss, obj_loss, cls_loss, box_loss, patched_inputs
+
+        for k in keys:
+            metrics[k] /= b
+            mlflow.log_metric(k, metrics[k], epoch)
+
+    return (
+        patch,
+        metrics["box_loss"],
+        metrics["obj_loss"],
+        metrics["cls_loss"],
+        metrics["nps_loss"],
+    )

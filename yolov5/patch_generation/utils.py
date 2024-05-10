@@ -2,9 +2,10 @@ import os
 import torch
 import glob
 import yaml
-import torchvision
 import os.path as osp
+import torchvision
 from typing import Tuple, Optional, Union, List
+from torchvision.transforms import Resize, CenterCrop, Compose, PILToTensor, ToTensor
 import matplotlib.pyplot as plt
 import numpy as np
 import PIL
@@ -78,23 +79,22 @@ class PatchTransform(torch.nn.Module):
         self.patch_size = patch.shape
         self.device = device
 
-    def forward(self, batch_size):
+    def forward(self):
         def uniform_unsqueeze_expand(min_, max_):
-            t = torch.FloatTensor(batch_size).uniform_(min_, max_).to(self.device)
-            t = t.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+            t = torch.FloatTensor(1).uniform_(min_, max_).to(self.device)
+            t = t.unsqueeze(-1).unsqueeze(-1)
             t = t.expand(
-                batch_size, self.patch_size[0], self.patch_size[1], self.patch_size[2]
+                1, self.patch_size[1], self.patch_size[2]
             )
             return t
 
         brightness = uniform_unsqueeze_expand(-0.1, 0.1)
         contrast = uniform_unsqueeze_expand(0.8, 1.2)
 
-        transformed_patches = self.patch.repeat(batch_size, 1, 1, 1)
-        transformed_patches = transformed_patches * contrast + brightness
-        transformed_patches = torch.clamp(transformed_patches, 0.000001, 0.99999)
+        self.patch = self.patch * contrast + brightness
+        self.patch = torch.clamp(self.patch, 0.000001, 0.99999)
 
-        return transformed_patches
+        return self.patch
 
 
 # credit: https://github.com/SamSamhuns/yolov5_adversarial/blob/master/adv_patch_gen/utils/dataset.py
@@ -204,64 +204,34 @@ class YOLODataset(Dataset):
                 >= (self.min_pixel_area / (self.model_in_sz[0] * self.model_in_sz[1]))
             ]
             label = label if len(label) > 0 else torch.zeros([1, 5])
-        image = transforms.ToTensor()(image)
+        image, label = self.patch_attack_transform(image, label)
         return image, label
 
-    # def pad_label(self, label: torch.Tensor) -> torch.Tensor:
-    #     """
-    #     Pad labels with zeros if fewer labels than max_n_labels present
-    #     """
-    #     pad_size = self.max_n_labels - label.shape[0]
-    #     if pad_size > 0:
-    #         padded_lab = F.pad(label, (0, 0, 0, pad_size), value=0)
-    #     else:
-    #         padded_lab = label[:self.max_n_labels]
-    #     return padded_lab
+    def patch_attack_transform(self, image: Image.Image, label: List):
+        img_w, img_h = image.size
+        resize_to_min_dimension = lambda x: CenterCrop(min(x.size))(x)
+        transform = Compose(
+            [
+                resize_to_min_dimension,
+                Resize(self.model_in_sz),
+                ToTensor(),
+            ]
+        )
+
+        if img_w < img_h:
+            padding = (img_h - img_w) / 2
+            label[:, [1]] = (label[:, [1]] * img_w + padding) / img_h
+            label[:, [3]] = label[:, [3]] * img_w / img_h
+        else:
+            padding = (img_w - img_h) / 2
+            label[:, [2]] = (label[:, [2]] * img_h + padding) / img_w
+            label[:, [4]] = label[:, [4]] * img_h / img_w
+        return transform(image), label
 
     def collate_fn(self, batch) -> Tuple[torch.Tensor, List]:
         images, labels = [b[0] for b in batch], [b[1] for b in batch]
-        if not self.patch_is_applied:
-            images = torch.stack(images)
+        images = torch.stack(images)
         return images, labels
-
-    def pad_and_scale(
-        self, img: PIL.Image.Image, lab: List
-    ) -> Tuple[PIL.Image.Image, List]:
-        """
-        Pad image and adjust label
-            img is a PIL image or torch.Tensor
-            lab is of fmt class x_center y_center width height with normalized coords
-        """
-        if isinstance(img, torch.Tensor):
-            img = transforms.ToPILImage()(img)
-        img_w, img_h = img.size
-        if img_w == img_h:
-            padded_img = img
-        else:
-            if img_w < img_h:
-                padding = (img_h - img_w) / 2
-                padded_img = Image.new("RGB", (img_h, img_h), color=(127, 127, 127))
-                padded_img.paste(img, (int(padding), 0))
-                lab[:, [1]] = (lab[:, [1]] * img_w + padding) / img_h
-                lab[:, [3]] = lab[:, [3]] * img_w / img_h
-            else:
-                padding = (img_w - img_h) / 2
-                padded_img = Image.new("RGB", (img_w, img_w), color=(127, 127, 127))
-                padded_img.paste(img, (0, int(padding)))
-                lab[:, [2]] = (lab[:, [2]] * img_h + padding) / img_w
-                lab[:, [4]] = lab[:, [4]] * img_h / img_w
-        padded_img = transforms.Resize(self.model_in_sz)(padded_img)
-
-        return padded_img, lab
-
-    def pad_and_scale_batch(self, images, labels) -> Tuple[torch.Tensor, List]:
-        padd_images, padd_labels = [], []
-        for img, label in zip(images, labels):
-            padd_img, padd_label = self.pad_and_scale(img, label)
-            padd_images.append(transforms.ToTensor()(padd_img))
-            padd_labels.append(padd_label)
-
-        return torch.stack(padd_images), padd_labels
 
     @staticmethod
     def expand_img_labels(img_idx: int, label: torch.Tensor):
@@ -340,96 +310,104 @@ def get_random_position(img_size=RESOLUTION, p_size=PATCH_SIZE):
     assert img_size[0] > p_size[0] and img_size[1] > p_size[1]
     h_limit = (0, img_size[0] - p_size[0])
     w_limit = (0, img_size[1] - p_size[1])
-    x = np.random.randint(h_limit[0], h_limit[1], 1)[0]
-    y = np.random.randint(w_limit[0], w_limit[1], 1)[0]
-    return torch.tensor([x, y])
+    for _ in range(10):
+        try:
+            x = np.random.randint(h_limit[0], h_limit[1], 1)[0]
+            y = np.random.randint(w_limit[0], w_limit[1], 1)[0]
 
+            assert img_size[0] > x + p_size[0]
+            assert img_size[1] > y + p_size[1]
 
-def apply_patch(image, patch, position=None):
-    """
-    Apply a patch to an image at a specified position.
-
-    Args:
-        image (torch.Tensor): The input image tensor.
-        patch (torch.Tensor): The patch tensor to be applied.
-        position (tuple): The position (x, y) where the patch should be placed.
-
-    Returns:
-        torch.Tensor: The resulting image tensor after applying the patch.
-        tuple: Position within image where patch was placed.
-    """
-    if not position:
-        for i in range(10):  # max. number of tries
-            try:
-                position = get_random_position(image.shape[1:], patch.shape[1:])
-                assert image.shape[1] > position[0] + patch.shape[1]
-                assert image.shape[2] > position[1] + patch.shape[2]
-                break
-            except AssertionError:
-                pass
-    patched_img = image.clone().detach()
-    x, y = position
-    patched_img[:, x : x + patch.shape[1], y : y + patch.shape[2]] = (
-        patch.clone().detach()
+            return torch.tensor([x, y])
+        except AssertionError:
+            pass
+    return torch.tensor(
+        [
+            0,
+        ]
     )
 
-    return patched_img.float(), position
 
-
-def batch_apply_patch(
-    images: Union[torch.Tensor, List], patches, positions=None
-) -> List:
+def apply_patch_to_images(patch, image_batch, num_positions: int = 1, positions=None):
     """
-    Apply patches to images at specified (or random) positions.
+    Apply patch to an image batch at specified positions.
 
     Args:
-        images (torch.Tensor or List of tensors): Batch of input image tensors (shape if tensor: [batch_size, channels, height, width]).
-        patches (torch.Tensor): Batch of patch tensors to be applied (shape: [batch_size, channels, patch_height, patch_width]).
-        positions (list of tuples): List of positions (x, y) where each patch should be placed.
-            If None, random positions will be generated for each image.
+        patch (torch.Tensor): shape (channels, height, width)
+        image_batch (torch.Tensor): Batch of input images (shape: [batch_size, channels, height, width]).
+        positions (list of tuples): List of positions where patches should be applied [(x1, y1), (x2, y2), ...].
 
     Returns:
-        List of tensors: Batch of resulting image tensors after applying the patches.
-        List of tuples: Positions where each patch was placed.
+        torch.Tensor: Batch of images with patches applied.
     """
-    patched_images = []
-    new_positions = []
-
-    # Iterate over each image-patch pair in the batch
-    for i in range(len(images)):
-        position_i = positions[i] if positions else None
-        patched_image, position = apply_patch(images[i], patches[i], position_i)
-        patched_images.append(patched_image)
-        new_positions.append(position)
-
-    return patched_images, new_positions
+    # patch = torch.randn(3,50,50).requires_grad_(True).cuda()
+    p_size = patch.shape[1:]  # HxW
+    img_size = image_batch.shape[2:]  # HxW
+    patch_batch = patch.unsqueeze(0).repeat(len(image_batch), 1, 1, 1)
 
 
-def apply_patch_and_pad_batch(
-    dataset: YOLODataset,
-    images: Union[torch.Tensor, PIL.Image.Image],
-    patches: torch.Tensor,
-    labels: List,
-    device: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Receives batches from a YOLODataset and applies patch before padding.
-    Ensures that patch is applied on the image instead of the padding.
+    if positions == None:
+        positions = [
+            get_random_position(img_size, p_size) for _ in range(num_positions)
+        ]
+    assert (
+        len(positions) == num_positions
+    ), "Arguments incorrect, len(positions) !=  num_positions"
 
-    Args:
-        dataset (YOLODataset):
-        images (Union[torch.Tensor, PIL.Image.Image]):
-        patches (torch.Tensor):
-        labels (List):
-        device (str):
+    patched_images = image_batch.clone()
+    for position in positions:
+        mask = torch.zeros_like(patched_images).float()
+        mask[
+             :, :, position[0] : position[0] + p_size[0], position[1] : position[1] + p_size[1]
+             ] = 1
 
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]:
-    """
-    patched_inputs, patch_positions = batch_apply_patch(images, patches)
-    patched_inputs, labels = dataset.pad_and_scale_batch(patched_inputs, labels)
-    patched_inputs = patched_inputs.to(device)
-    targets = dataset.labels_to_targets(labels).to(device)
-    return patched_inputs, targets, patch_positions
+        pad_left = position[0]
+        pad_right = img_size[0] - pad_left - p_size[0]
+        pad_top = position[1]
+        pad_bottom = img_size[1] - pad_top - p_size[1]
+        padding = (pad_left, pad_top, pad_right, pad_bottom)
+        padded_patch_batch = transforms.Pad(padding=padding)(patch_batch).permute(
+            0, 1, 3, 2
+        )
+
+        patched_images = torch.where((mask == 0), patched_images, padded_patch_batch)
+
+    return patched_images, positions
+
+
+# def apply_patch_and_pad_images(
+#     dataset: YOLODataset,
+#     images: Union[torch.Tensor, List],
+#     patch: torch.Tensor,
+#     labels: List,
+#     num_positions: int = 1,
+#     device: str = "cuda",
+# ) -> Tuple[torch.Tensor, torch.Tensor, List[List]]:
+#     """
+#     Apply patches to images and perform padding and scaling in batch.
+#     Images and labels should be batches of a YOLODataset dataset with the patch_attack_transform
+#     applied.
+
+#     Args:
+#         dataset (YOLODataset): Dataset object.
+#         images (torch.Tensor): Batch of input image tensors (shape: [batch_size, channels, height, width]).
+#         patches (torch.Tensor): Batch of patch tensors to be applied (shape: [batch_size, channels, patch_height, patch_width]).
+#         labels (List): List of labels associated with the images.
+#         num_positions: number of times to position patch in each image.
+#         device (str): Device to which tensors should be moved ('cpu' or 'cuda').
+
+#     Returns:
+#         Tuple[torch.Tensor, torch.Tensor, List[List]: Batch of padded and scaled images,
+#         Batch of labels after scaling and list of position lists, one for each image.
+#     """
+#     padded_images = []
+#     new_labels = []
+#     positions = []
+
+#     patched_images, positions = apply_patch_to_images(patch, images, positions=None, num_positions=num_positions)
+
+#     targets = dataset.labels_to_targets(labels).to(device)
+#     return torch.stack(padded_images).to(device), targets, positions
 
 
 def generate_patch(resolution=None, p_size=None):
